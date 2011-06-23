@@ -1,0 +1,26 @@
+--- #YAML:1.0
+name:               AnyEvent-HTTP-Socks
+version:            0.01
+abstract:           Adds socks support for AnyEvent::HTTP 
+author:
+    - Oleg G <oleg@>
+license:            perl
+distribution_type:  module
+configure_requires:
+    ExtUtils::MakeMaker:  0
+build_requires:
+    ExtUtils::MakeMaker:  0
+requires:
+    AnyEvent::HTTP:     1.5
+    IO::Socket::Socks:  0.5
+    Test::More:         0.88
+resources:
+    repository:  https://github.com/olegwtf/p5-AnyEvent-HTTP-Socks
+no_index:
+    directory:
+        - t
+        - inc
+generated_by:       ExtUtils::MakeMaker version 6.56
+meta-spec:
+    url:      http://module-build.sourceforge.net/META-spec-v1.4.html
+    version:  1.4
