@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:               AnyEvent-HTTP-Socks
-version:            0.01
+version:            0.02
 abstract:           Adds socks support for AnyEvent::HTTP 
 author:
     - Oleg G <oleg@>
