@@ -16,7 +16,7 @@ our @EXPORT = qw(
 	http_request
 );
 
-our $VERSION = '0.02';
+our $VERSION = '0.03';
 
 use constant {
 	READ_WATCHER  => 1,
@@ -45,9 +45,16 @@ sub http_request($$@) {
 	
 	my $socks = delete $opts{socks};
 	if ($socks) {
-		if (my ($s_ver, $s_login, $s_pass, $s_host, $s_port) = $socks =~ m!^socks(4|4a|5)://(?:([^:]+):([^@]*)@)?([^:]+):(\d+)$!) {
+		my @chain;
+		while ($socks =~ m!socks(4|4a|5)://(?:([^\s:]+):([^\s@]*)@)?([^\s:]+):(\d+)!g) {
+			push @chain, {ver => $1, login => $2, pass => $3, host => $4, port => $5};
+		}
+		
+		if (@chain) {
 			$opts{tcp_connect} = sub {
-				_socks_prepare_connection($s_ver, $s_login, $s_pass, $s_host, $s_port, @_);
+				my ($cv, $watcher, $timer, $sock);
+				my @tmp_chain = @chain; # copy: on redirect @tmp_chain will be already empty
+				_socks_prepare_connection(\$cv, \$watcher, \$timer, $sock, \@tmp_chain, @_);
 			};
 		}
 		else {
@@ -64,88 +71,115 @@ sub inject {
 }
 
 sub _socks_prepare_connection {
-	my ($s_ver, $s_login, $s_pass, $s_host, $s_port, $c_host, $c_port, $c_cb, $p_cb) = @_;
+	my ($cv, $watcher, $timer, $sock, $chain, $c_host, $c_port, $c_cb, $p_cb) = @_;
 	
-	socket(my $sock, PF_INET, SOCK_STREAM, getprotobyname('tcp'))
-		or return $c_cb->();
-	my $timeout = $p_cb->($sock);
+	unless ($sock) { # first connection in the chain
+		socket($sock, PF_INET, SOCK_STREAM, getprotobyname('tcp'))
+			or return $c_cb->();
+			
+		my $timeout = $p_cb->($sock);
+		$$timer = AnyEvent->timer(
+			after => $timeout,
+			cb => sub {
+				undef $$watcher;
+				undef $$cv;
+				$! = Errno::ETIMEDOUT;
+				$c_cb->();
+			}
+		);
+	}
 	
-	my ($watcher, $timer);
-	my $cv = AE::cv {
-		_socks_connect(\$watcher, \$timer, $sock, $s_ver, $s_login, $s_pass, $s_host, $s_port, $c_host, $c_port, $c_cb);
+	$$cv = AE::cv {
+		_socks_connect($cv, $watcher, $timer, $sock, $chain, $c_host, $c_port, $c_cb);
 	};
 	
-	$cv->begin;
+	$$cv->begin;
 	
-	$cv->begin;
-	inet_aton $s_host, sub {
-		$s_host = format_address shift;
-		$cv->end if $cv;
+	$$cv->begin;
+	inet_aton $chain->[0]{host}, sub {
+		$chain->[0]{host} = format_address shift;
+		$$cv->end if $$cv;
 	};
-	#                                                                 '4a' == 4 -> true
-	if (($s_ver == 5 &&  $IO::Socket::Socks::SOCKS5_RESOLVE == 0) || ($s_ver eq '4' && $IO::Socket::Socks::SOCKS4_RESOLVE == 0)) {
-		# resolving on client side enabled
-		$cv->begin;
-		inet_aton $c_host, sub {
-			$c_host = format_address shift;
-			$cv->end if $cv;
+	
+	if (($chain->[0]{ver} == 5 &&  $IO::Socket::Socks::SOCKS5_RESOLVE == 0) ||
+	    ($chain->[0]{ver} eq '4' && $IO::Socket::Socks::SOCKS4_RESOLVE == 0)) { # 4a = 4
+		# resolving on the client side enabled
+		my $host = @$chain > 1 ? \$chain->[1]{host} : \$c_host;
+		$$cv->begin;
+		
+		inet_aton $$host, sub {
+			$$host = format_address shift;
+			$$cv->end if $$cv;
 		}
 	}
 	
-	$cv->end;
-	
-	$timer = AnyEvent->timer(
-		after => $timeout,
-		cb => sub {
-			undef $watcher;
-			undef $cv;
-			$! = Errno::ETIMEDOUT;
-			$c_cb->();
-		}
-	);
+	$$cv->end;
 	
 	return $sock;
 }
 
 sub _socks_connect {
-	my ($watcher, $timer, $sock, $s_ver, $s_login, $s_pass, $s_host, $s_port, $c_host, $c_port, $c_cb) = @_;
+	my ($cv, $watcher, $timer, $sock, $chain, $c_host, $c_port, $c_cb) = @_;
+	my $link = shift @$chain;
 	
 	my @specopts;
-	if ($s_ver eq '4a') {
-		$s_ver = 4;
+	if ($link->{ver} eq '4a') {
+		$link->{ver} = 4;
 		push @specopts, SocksResolve => 1;
 	}
 	
-	if (defined $s_login) {
-		push @specopts, Username => $s_login, Password => $s_pass;
-		if ($s_ver == 5) {
-			push @specopts, AuthType => 'userpass';
+	if (defined $link->{login}) {
+		push @specopts, Username => $link->{login};
+		if ($link->{ver} == 5) {
+			push @specopts, Password => $link->{pass}, AuthType => 'userpass';
 		}
 	}
 	
-	$sock = IO::Socket::Socks->new_from_socket(
-		$sock,
-		Blocking     => 0,
-		ProxyAddr    => $s_host,
-		ProxyPort    => $s_port,
-		SocksVersion => $s_ver,
-		ConnectAddr  => $c_host,
-		ConnectPort  => $c_port,
-		@specopts
-	) or return $c_cb->();
+	my ($host, $port) = @$chain ? ($chain->[0]{host}, $chain->[0]{port}) : ($c_host, $c_port);
+	
+	if (ref($sock) eq 'GLOB') {
+		# not connected socket
+		$sock = IO::Socket::Socks->new_from_socket(
+			$sock,
+			Blocking     => 0,
+			ProxyAddr    => $link->{host},
+			ProxyPort    => $link->{port},
+			SocksVersion => $link->{ver},
+			ConnectAddr  => $host,
+			ConnectPort  => $port,
+			@specopts
+		) or return $c_cb->();
+	}
+	else {
+		$sock->command(
+			SocksVersion => $link->{ver},
+			ConnectAddr  => $host,
+			ConnectPort  => $port,
+			@specopts
+		) or return $c_cb->();
+	}
+	
+	my ($poll, $w_type) = $SOCKS_ERROR == SOCKS_WANT_READ ?
+	                                  ('r', READ_WATCHER) :
+	                                  ('w', WRITE_WATCHER);
 	
 	$$watcher = AnyEvent->io(
 		fh => $sock,
-		poll => 'w',
-		cb => sub { _socks_handshake($watcher, $timer, WRITE_WATCHER, $sock, $c_cb) }
+		poll => $poll,
+		cb => sub { _socks_handshake($cv, $watcher, $w_type, $timer, $sock, $chain, $c_host, $c_port, $c_cb) }
 	);
 }
 
 sub _socks_handshake {
-	my ($watcher, $timer, $w_type, $sock, $c_cb) = @_;
+	my ($cv, $watcher, $w_type, $timer, $sock, $chain, $c_host, $c_port, $c_cb) = @_;
 	
 	if ($sock->ready) {
 		undef $$watcher;
+		
+		if (@$chain) {
+			return _socks_prepare_connection($cv, $watcher, $timer, $sock, $chain, $c_host, $c_port, $c_cb);
+		}
+		
 		undef $$timer;
 		return $c_cb->($sock);
 	}
@@ -156,7 +190,7 @@ sub _socks_handshake {
 			$$watcher = AnyEvent->io(
 				fh => $sock,
 				poll => 'w',
-				cb => sub { _socks_handshake($watcher, $timer, WRITE_WATCHER, $sock, $c_cb) }
+				cb => sub { _socks_handshake($cv, $watcher, WRITE_WATCHER, $timer, $sock, $chain, $c_host, $c_port, $c_cb) }
 			);
 		}
 	}
@@ -166,7 +200,7 @@ sub _socks_handshake {
 			$$watcher = AnyEvent->io(
 				fh => $sock,
 				poll => 'r',
-				cb => sub { _socks_handshake($watcher, $timer, READ_WATCHER, $sock, $c_cb) }
+				cb => sub { _socks_handshake($cv, $watcher, READ_WATCHER, $timer, $sock, $chain, $c_host, $c_port, $c_cb) }
 			);
 		}
 	}
@@ -218,6 +252,11 @@ login will be interpreted as userid.
 3 - ip or hostname of the proxy server
 
 4 - port of the proxy server
+
+You can also make connection through a socks chain. Simply specify several socks proxies in the socks string
+and devide them by tab(s) or space(s):
+
+  "socks4://10.0.0.1:1080  socks5://root:123@10.0.0.2:1080  socks4a://85.224.100.1:9010"
 
 =head1 METHODS
 

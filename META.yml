@@ -1,9 +1,9 @@
 --- #YAML:1.0
 name:               AnyEvent-HTTP-Socks
-version:            0.02
+version:            0.03
 abstract:           Adds socks support for AnyEvent::HTTP 
 author:
-    - Oleg G <oleg@>
+    - Oleg G <oleg@cpan.org>
 license:            perl
 distribution_type:  module
 configure_requires:
@@ -20,7 +20,7 @@ no_index:
     directory:
         - t
         - inc
-generated_by:       ExtUtils::MakeMaker version 6.56
+generated_by:       ExtUtils::MakeMaker version 6.55_02
 meta-spec:
     url:      http://module-build.sourceforge.net/META-spec-v1.4.html
     version:  1.4
